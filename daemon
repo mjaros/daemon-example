@@ -1,0 +1,140 @@
+#!/usr/bin/env ruby
+
+require 'timeout'
+
+# Set path to pidfile
+PID_FILE = File.expand_path("../#{File.basename(__FILE__)}.pid", __FILE__)
+# Set process name to filename (shows up in ps, top)
+$0 = File.basename(__FILE__)
+
+# Put all code that needs to be processed into this class
+class Worker
+  def initialize
+    work
+  end
+
+  def work
+    while $running
+      # Do some stuff
+      breakable_sleep(300)
+    end
+  end
+end
+
+# Copy stdout because we'll need to reopen it later on
+$orig_stdout = STDOUT.clone
+
+def daemonize
+  if Process.respond_to? :daemon # We are on Ruby 1.9
+    Process.daemon
+  else
+    exit if fork
+    Process.setsid
+    exit if fork
+    Dir.chdir "/"
+    STDIN.reopen "/dev/null"
+    STDOUT.reopen "/dev/null", "a"
+    STDERR.reopen "/dev/null", "a"
+  end
+  create_pid
+  $running = true
+  trap('TERM') do
+    $running = false
+    destroy_pid
+  end
+end
+
+def create_pid
+  begin
+    File.open(PID_FILE, "w") { |f| f.write("#{Process.pid}") }
+  rescue Errno::EACCES
+    STDOUT.reopen $orig_stdout
+    puts "Error: Can't write to #{PID_FILE} - Permission denied"
+    exit!
+  end
+end
+
+def destroy_pid
+  File.delete(PID_FILE) if File.exists?(PID_FILE) && get_pid == Process.pid
+end
+
+def get_pid
+  begin
+    File.open(PID_FILE, "r") { |f| return f.gets.to_i }
+  rescue Errno::ENOENT
+    puts "Error: PID File not found #{PID_FILE}"
+    exit!
+  end
+end
+
+def start
+  print "Starting... "
+  daemonize
+  STDOUT.reopen $orig_stdout
+  puts "done! (PID is #{get_pid})\n"
+  STDOUT.reopen "/dev/null", "a"
+  Worker.new
+end
+
+def stop
+  print "Stopping... "
+  pid = get_pid
+  begin
+    Process.kill('TERM', pid)
+    Timeout.timeout(30) { sleep 0.1 while running?(pid) }
+  rescue Errno::ESRCH
+    puts "Error: Couldn't find process with PID #{pid}"
+    exit!
+  rescue Timeout::Error
+    print "timeout while sending TERM signal, sending KILL signal now... "
+    Process.kill('KILL', pid)
+    destroy_pid
+  end
+  puts "done!\n"
+end
+
+def restart
+  stop
+  start
+end
+
+def status
+  if running?(get_pid)
+    puts "#{$0} is running"
+  else
+    puts "#{$0} is not running"
+  end
+end
+
+def running?(pid)
+  begin
+    Process.getpgid(pid) != -1
+  rescue Errno::ESRCH
+    false
+  end
+end
+
+# A special sleep function that makes sleep breakable and thus allows us
+# in combination with $running to securely exit our worker process without
+# having to wait for sleep to finish
+def breakable_sleep(seconds)
+  while seconds > 0
+    sleep(1)
+    seconds -= 1
+    break unless $running
+  end
+end
+
+# Command line argument parsing
+case ARGV[0]
+when "start"
+  start
+when "stop"
+  stop
+when "restart"
+  restart
+when "status"
+  status
+else
+  puts "Usage: #{$0} {start|stop|restart|status}"
+end
