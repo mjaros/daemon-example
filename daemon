@@ -90,7 +90,7 @@ def stop
     Process.kill('KILL', pid)
     destroy_pid
   end
-  puts "done!\n"
+  puts "done!"
 end
 
 def restart
